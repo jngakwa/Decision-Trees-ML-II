@@ -9,22 +9,357 @@ output: html_document
 knitr::opts_chunk$set(echo = TRUE)
 ```
 
-## R Markdown
 
-This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
-
-When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
-
-```{r cars}
-summary(cars)
+### Libraries required
+```{r}
+library(tidyverse)
+library(tree)
+library(randomForest)
 ```
 
-## Including Plots
 
-You can also embed plots, for example:
+Load the data
+```{r}
+# Load the data
 
-```{r pressure, echo=FALSE}
-plot(pressure)
+load("youth_data.RData")
+
 ```
 
-Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
+
+Explore the data with question "How do demographic and household factors influence youth substance use and its frequency?" 
+
+### Cleaning the dataset
+
+Filter out the required variables to help find insights to the question and ensure the variables are appropriate for modeling. 
+
+```{r}
+mini_df <- df %>%
+  mutate(
+    
+    # Y-variables
+    ALCFLAG = factor(ALCFLAG), 
+    MRJYDAYS = factor(MRJYDAYS),
+    
+    # Regression target cleanup
+    IRCIGFM = ifelse(IRCIGFM <= 30, as.numeric(IRCIGFM),
+                ifelse(IRCIGFM %in% c(91, 93), 0, NA)),
+    
+    # convert demographics to factors
+    IRSEX = factor(IRSEX),
+    NEWRACE2 = factor(NEWRACE2),
+    INCOME = factor(INCOME),
+    POVERTY3 = factor(POVERTY3),
+    EDUSCHGRD2 = factor(EDUSCHGRD2),
+    EDUSCHLGO = factor(EDUSCHLGO),
+    IMOTHER = factor(IMOTHER),
+    IFATHER = factor(IFATHER),
+    GOVTPROG = factor(GOVTPROG),
+    PDEN10 = factor(PDEN10),
+    COUTYP4 = factor(COUTYP4),
+    
+    # Numeric
+    EDUSKPCOM = as.numeric(EDUSKPCOM)
+  ) %>%
+  drop_na()
+```
+
+
+#### Train / Test splits
+```{r}
+set.seed(123)
+
+n <- nrow(mini_df)
+
+index <- sample(1:n, n * 0.8)
+train <- mini_df[index, ]
+test <- mini_df[- index, ]
+```
+
+## Models 
+
+### Binary Classification 
+
+Utilizing the Alcohol variable, create a tree, plot for visualization, and evaluate the performance on the test data
+
+
+```{r}
+dem_tree <- tree(ALCFLAG ~ IRSEX + NEWRACE2 + INCOME + POVERTY3 +
+                   EDUSCHGRD2 + EDUSCHLGO + EDUSKPCOM +
+                   IMOTHER + IFATHER + GOVTPROG +
+                   PDEN10 + COUTYP4,
+                 data = train)
+
+summary(dem_tree)
+
+plot(dem_tree)
+text(dem_tree, pretty = 0)
+
+dem_tree
+```
+
+The classification tree identifies school grade level (EDUSCHGRD2) as the only variable used to predict alcohol use, highlighting its importance among demographic factors. The model splits students into three groups: younger students in grades 1–3, intermediate students in grades 4–5, and older students in grades 6–10. The probability of alcohol use increases steadily across these groups, with the youngest students showing very low usage rates (about 6%), middle grades showing moderate usage (about 17%), and older students showing the highest likelihood (about 34%). Although the model captures a clear trend between age and alcohol use, the overall misclassification error rate of about 24.9% indicates that demographic variables alone provide only moderate predictive power.
+
+
+Prune the tree then evaluate the test data on the pruned tree
+```{r}
+cv_tree <- cv.tree(dem_tree, FUN = prune.misclass)
+
+best_size <- cv_tree$size[which.min(cv_tree$dev)]
+
+pruned_tree <- prune.misclass(dem_tree, best = best_size)
+
+plot(pruned_tree)
+text(pruned_tree, pretty = 0)
+
+pruned_tree
+```
+
+
+
+
+
+
+Evaluating the test data we get 
+
+```{r}
+dem_pred <- predict(pruned_tree, test, type = "class")
+
+table(dem_pred, test$ALCFLAG)
+```
+
+The confusion matrix shows that the model predicts only the majority class (no alcohol use) for all observations. This results in an accuracy of approximately 75%, but the model fails to identify any instances of alcohol use. This behavior reflects class imbalance in the dataset, where most youth report not using alcohol, as well as the limited predictive power of demographic variables alone.
+
+
+
+### Bagging 
+
+```{r}
+bag_model <- randomForest(
+  ALCFLAG ~ IRSEX + NEWRACE2 + INCOME + POVERTY3 +
+    EDUSCHGRD2 + EDUSCHLGO + EDUSKPCOM +
+    IMOTHER + IFATHER + GOVTPROG +
+    PDEN10 + COUTYP4,
+  
+  data = train,
+  ntree = 300,
+  mtry = 12,   
+  importance = TRUE
+)
+
+bag_pred <- predict(bag_model, test)
+
+mean(bag_pred == test$ALCFLAG)
+table(bag_pred,test$ALCFLAG)
+
+```
+
+While it’s more complex than the single tree, it performs worse than a blind guess. The accuracy is approximately 71%, which is lower than the 75% baseline. Looking at the confusion matrix, the model is struggling to identify drinkers as it missed roughly 80% of the actual drinkers in the test set.
+
+
+### Random Forest Binary
+
+```{r}
+dem_rf <- randomForest(
+  ALCFLAG ~ IRSEX + NEWRACE2 + INCOME + POVERTY3 +
+    EDUSCHGRD2 + EDUSCHLGO + EDUSKPCOM +
+    IMOTHER + IFATHER + GOVTPROG +
+    PDEN10 + COUTYP4,
+  
+  data = train,
+  importance = TRUE
+)
+
+
+
+rf_pred <- predict(dem_rf, test)
+
+table(rf_pred,test$ALCFLAG)
+```
+
+The random forest model shows limited ability to identify alcohol users. While it correctly classified 76.9% of non-alcohol users, it only accurately identified 12.2% of actual alcohol users, misclassifying the remaining 87.8% as non-users. 
+
+
+
+
+These plots identify which features most influence the random forest model's decisions. EDUSCHGRD2, which represents the respondent's level of education, is the top predictor in both charts by a considerable margin, meaning it has the strongest impact on predicting alcohol use. Variables like POVERTY3, COUTYP4, and INCOME provide solid secondary value, whereas features at the bottom such as IMOTHER and IRSEX have very little influence on the outcome.
+
+
+# Tuning 
+```{r}
+set.seed(123)
+
+mtry_vals <- c(2, 3, 5, 7, 9, 11)
+oob_errors <- c()
+
+for (m in mtry_vals) {
+  
+  model <- randomForest(
+    ALCFLAG ~ IRSEX + NEWRACE2 + INCOME + POVERTY3 +
+      EDUSCHGRD2 + EDUSCHLGO + EDUSKPCOM +
+      IMOTHER + IFATHER + GOVTPROG +
+      PDEN10 + COUTYP4,
+    
+    data = train,
+    mtry = m,
+    ntree = 500
+  )
+  
+  oob_errors <- c(oob_errors, model$err.rate[nrow(model$err.rate), 1])
+}
+
+data.frame(mtry_vals, oob_errors)
+```
+
+
+# Final model 
+```{r}
+final_rf_model <- randomForest(
+  ALCFLAG ~ IRSEX + NEWRACE2 + INCOME + POVERTY3 +
+    EDUSCHGRD2 + EDUSCHLGO + EDUSKPCOM +
+    IMOTHER + IFATHER + GOVTPROG +
+    PDEN10 + COUTYP4,
+  
+  data = train,
+  mtry = 2,
+  ntree = 500,
+  importance = TRUE
+)
+
+rf_pred <- predict(final_rf_model, newdata = test)
+
+confusion_matrix <- table(Predicted = rf_pred, Actual = test$ALCFLAG)
+confusion_matrix
+
+accuracy <- sum(diag(confusion_matrix)) / sum(confusion_matrix)
+accuracy
+```
+
+```{r}
+varImpPlot(final_rf_model)
+```
+
+
+
+
+
+
+### Multi-class Marijuana Use
+
+```{r}
+rf_multi <- randomForest(
+  MRJYDAYS ~ IRSEX + NEWRACE2 + INCOME + POVERTY3 +
+    EDUSCHGRD2 + EDUSCHLGO + EDUSKPCOM +
+    IMOTHER + IFATHER + GOVTPROG +
+    PDEN10 + COUTYP4,
+  
+  data = train,
+  ntree = 300
+)
+
+multi_pred <- predict(rf_multi, test)
+
+mean(multi_pred == test$MRJYDAYS)
+table(multi_pred, test$MRJYDAYS)
+```
+
+
+### Regression: Cigarette Use
+
+```{r}
+rf_reg <- randomForest(
+  IRCIGFM ~ IRSEX + NEWRACE2 + INCOME + POVERTY3 +
+    EDUSCHGRD2 + EDUSCHLGO + EDUSKPCOM +
+    IMOTHER + IFATHER + GOVTPROG +
+    PDEN10 + COUTYP4,
+  
+  data = train,
+  ntree = 300
+)
+
+pred_reg <- predict(rf_reg, test)
+
+mse <- mean((pred_reg - test$IRCIGFM)^2)
+rmse <- sqrt(mse)
+rmse
+
+
+```
+
+```{r}
+library(ggplot2)
+
+# Create the data frame
+cm <- data.frame(
+  Actual = factor(c(0, 1, 0, 1), levels = c(1, 0)),
+  Predicted = factor(c(0, 0, 1, 1), levels = c(0, 1)),
+  Count = c(1093, 328, 148, 81)
+)
+
+# Plot
+ggplot(cm, aes(x = Predicted, y = Actual, fill = Count)) +
+  geom_tile(color = "white", lwd = 1.5) +
+  geom_text(aes(label = Count), color = "white", size = 8, fontface = "bold") +
+  scale_fill_gradient(low = "#91bfdb", high = "#4575b4") +
+  scale_x_discrete(position = "top") +
+  labs(title = "Bagging Model Confusion Matrix",
+       subtitle = "Accuracy: 71.1%",
+       x = "Predicted Label",
+       y = "Actual Label") +
+  theme_minimal() +
+  theme(panel.grid = element_blank(),
+        plot.title = element_text(size = 18, face = "bold"),
+        axis.text = element_text(size = 14))
+
+```
+
+```{r}
+library(ggplot2)
+
+# Data frame for the "Majority Class" model
+cm_dem <- data.frame(
+  Actual = factor(c(0, 1, 0, 1), levels = c(1, 0)),
+  Predicted = factor(c(0, 0, 1, 1), levels = c(0, 1)),
+  Count = c(1241, 409, 0, 0)
+)
+
+ggplot(cm_dem, aes(x = Predicted, y = Actual, fill = Count)) +
+  geom_tile(color = "white", lwd = 1.5) +
+  geom_text(aes(label = Count), color = "black", size = 8, fontface = "bold") +
+  scale_fill_gradient(low = "#fee0d2", high = "#de2d26") + # Red alert theme
+  scale_x_discrete(position = "top", drop = FALSE) + 
+  scale_y_discrete(drop = FALSE) +
+  labs(title = "Decision Tree (dem_pred) Confusion Matrix",
+       subtitle = "Warning: Model is only predicting the majority class",
+       x = "Predicted Label",
+       y = "Actual Label") +
+  theme_minimal() +
+  theme(panel.grid = element_blank())
+
+```
+
+```{r}
+
+# Create the data frame for Random Forest
+cm_rf <- data.frame(
+  Actual = factor(c(0, 1, 0, 1), levels = c(1, 0)),
+  Predicted = factor(c(0, 0, 1, 1), levels = c(0, 1)),
+  Count = c(1233, 398, 8, 11)
+)
+
+ggplot(cm_rf, aes(x = Predicted, y = Actual, fill = Count)) +
+  geom_tile(color = "white", lwd = 1.5) +
+  geom_text(aes(label = Count), color = "white", size = 8, fontface = "bold") +
+  scale_fill_gradient(low = "#a1d99b", high = "#238b45") + # Green theme for RF
+  scale_x_discrete(position = "top") +
+  labs(title = "Random Forest (rf_pred) Confusion Matrix",
+       subtitle = "Overall Accuracy: 75.3%",
+       x = "Predicted Label",
+       y = "Actual Label") +
+  theme_minimal() +
+  theme(panel.grid = element_blank(),
+        plot.title = element_text(size = 18, face = "bold"),
+        axis.text = element_text(size = 14))
+
+```
+
